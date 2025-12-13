@@ -13,6 +13,7 @@ coverage.xml
 .idea/
 .vscode/
 .env
+.python-version
 .DS_Store
 
 
