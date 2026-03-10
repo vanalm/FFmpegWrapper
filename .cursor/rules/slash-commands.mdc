@@ -1,0 +1,84 @@
+---
+description: Slash commands for common FFmpegWrapper operations -- build, sign, test, run, release
+alwaysApply: true
+---
+
+# Slash Commands
+
+When the user types any of these commands (with or without the slash), execute the corresponding workflow.
+
+## /run
+
+Launch the app locally for testing:
+
+```bash
+cd /Users/jacobvanalmelo/code/ffmpeg_app
+PYTHONPATH=src python -m ffmpeg_app.main
+```
+
+## /test
+
+Run the test suite:
+
+```bash
+cd /Users/jacobvanalmelo/code/ffmpeg_app
+PYTHONPATH=src python -m pytest tests/ -v
+```
+
+## /build
+
+Clean build the macOS .app bundle:
+
+```bash
+cd /Users/jacobvanalmelo/code/ffmpeg_app
+rm -rf dist/ build/
+pyinstaller --clean -y pyinstaller-macos.spec
+```
+
+## /sign
+
+Code-sign the built app (requires build first). Read `signing-config.local.sh` for the identity:
+
+```bash
+source signing-config.local.sh
+cd dist
+codesign --deep --force --options runtime \
+  --entitlements ../entitlements.plist \
+  --sign "$CODESIGN_IDENTITY" \
+  FFmpegWrapper.app
+codesign --verify --deep --strict FFmpegWrapper.app
+```
+
+## /notarize
+
+Zip, submit for notarization, staple, and verify (requires sign first). Read `signing-config.local.sh` for the profile:
+
+```bash
+source signing-config.local.sh
+cd dist
+rm -f FFmpegWrapper.zip
+ditto -c -k --keepParent FFmpegWrapper.app FFmpegWrapper.zip
+xcrun notarytool submit FFmpegWrapper.zip --keychain-profile "$NOTARIZE_PROFILE" --wait
+xcrun stapler staple FFmpegWrapper.app
+spctl -a -vv FFmpegWrapper.app
+```
+
+## /release
+
+Full pipeline: build + sign + notarize + re-zip for distribution. Run /build, then /sign, then /notarize, then re-zip:
+
+```bash
+cd /Users/jacobvanalmelo/code/ffmpeg_app/dist
+rm -f FFmpegWrapper.zip
+ditto -c -k --keepParent FFmpegWrapper.app FFmpegWrapper.zip
+```
+
+## /deps
+
+Install all dependencies:
+
+```bash
+cd /Users/jacobvanalmelo/code/ffmpeg_app
+pip install -r requirements.txt
+pip install -e ".[dev]"
+```

@@ -1,0 +1,42 @@
+---
+description: Project conventions and architecture for the FFmpegWrapper PySide6 desktop app
+alwaysApply: true
+---
+
+# FFmpegWrapper Project Conventions
+
+## Stack
+
+- Python 3.9+, PySide6 (Qt), OpenAI SDK
+- GUI: manual widget layouts (no QML)
+- Background work: QThread + QObject.moveToThread()
+- Settings: dataclass + JSON at ~/.ffmpeg_app_settings.json
+- Build: PyInstaller, codesign, notarytool (macOS)
+
+## Source Layout
+
+- All app code in `src/ffmpeg_app/`
+- Tests in `tests/` (pytest, run with `PYTHONPATH=src`)
+- PyInstaller entry: `app_entry.py`
+- Dev entry: `PYTHONPATH=src python -m ffmpeg_app.main`
+
+## Module Responsibilities
+
+| Module | Owns |
+|--------|------|
+| `ui.py` | All GUI widgets, dialogs, workers |
+| `settings.py` | AppSettings dataclass, load/save, constants |
+| `options.py` | FFmpegOptions, arg building, output path |
+| `ffmpeg_runner.py` | Subprocess execution, cancel |
+| `transcriber.py` | Audio extraction, Deepgram API |
+| `notes_generator.py` | OpenAI Responses API |
+
+## Coding Standards
+
+- Use `from __future__ import annotations` in every module
+- Type hints on all function signatures
+- Dataclasses for structured data (settings, options)
+- No inline comments that just narrate what code does
+- Keep API keys in settings, never hardcode
+- New deps go in both `requirements.txt` and `pyproject.toml`
+- After adding a hidden import, update `hiddenimports` in `pyinstaller-macos.spec`
