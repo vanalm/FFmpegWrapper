@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,13 +30,15 @@ from PySide6.QtWidgets import (
 )
 
 from .ffmpeg_runner import FFmpegRunner
+from .notes_generator import run_notes_generation
 from .options import PRESETS, FFmpegOptions, suggest_output_path
-from .settings import AppSettings
+from .settings import MODELS_BY_PROVIDER, PROVIDERS, AppSettings
+from .transcriber import run_transcription
 
 
 class FFmpegWorker(QObject):
     log_line = Signal(str)
-    finished = Signal(bool, object)  # success, error message or None
+    finished = Signal(bool, object)
 
     def __init__(self, runner: FFmpegRunner, options: FFmpegOptions) -> None:
         super().__init__()
@@ -53,6 +56,75 @@ class FFmpegWorker(QObject):
         self.runner.cancel()
 
 
+class PostProcessWorker(QObject):
+    """Runs transcript and/or notes generation on a background thread."""
+
+    log_line = Signal(str)
+    finished = Signal(bool, object)
+
+    def __init__(
+        self,
+        input_path: Path,
+        output_dir: Path,
+        settings: AppSettings,
+        do_transcript: bool,
+        do_notes: bool,
+    ) -> None:
+        super().__init__()
+        self.input_path = input_path
+        self.output_dir = output_dir
+        self.settings = settings
+        self.do_transcript = do_transcript
+        self.do_notes = do_notes
+        self._cancelled = False
+
+    def run(self) -> None:
+        try:
+            transcript_text: Optional[str] = None
+
+            if self.do_transcript or self.do_notes:
+                if not self.settings.deepgram_api_key:
+                    self.finished.emit(False, "Deepgram API key not set. Check Settings.")
+                    return
+
+                self.log_line.emit("\n--- Transcription ---\n")
+                transcript_text, _ = run_transcription(
+                    self.input_path,
+                    self.output_dir,
+                    api_key=self.settings.deepgram_api_key,
+                    ffmpeg_binary=self.settings.ffmpeg_path,
+                    log=self.log_line.emit,
+                )
+
+            if self._cancelled:
+                self.finished.emit(False, "Cancelled")
+                return
+
+            if self.do_notes:
+                if not self.settings.openai_api_key:
+                    self.finished.emit(False, "OpenAI API key not set. Check Settings.")
+                    return
+
+                self.log_line.emit("\n--- Meeting Notes ---\n")
+                run_notes_generation(
+                    transcript=transcript_text or "",
+                    input_path=self.input_path,
+                    output_dir=self.output_dir,
+                    system_prompt=self.settings.notes_system_prompt,
+                    api_key=self.settings.openai_api_key,
+                    model=self.settings.notes_model,
+                    log=self.log_line.emit,
+                )
+
+            self.finished.emit(True, None)
+        except Exception as exc:
+            self.log_line.emit(f"Error: {exc}\n{traceback.format_exc()}\n")
+            self.finished.emit(False, str(exc))
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -63,6 +135,9 @@ class SettingsDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout()
+
+        # --- FFmpeg defaults ---
+        ffmpeg_group = QGroupBox("FFmpeg Defaults")
         grid = QGridLayout()
         row = 0
 
@@ -121,8 +196,69 @@ class SettingsDialog(QDialog):
         grid.addLayout(ffmpeg_row, row, 1, 1, 2)
         row += 1
 
-        layout.addLayout(grid)
+        ffmpeg_group.setLayout(grid)
+        layout.addWidget(ffmpeg_group)
 
+        # --- API Keys ---
+        keys_group = QGroupBox("API Keys")
+        keys_grid = QGridLayout()
+        kr = 0
+
+        self.deepgram_key_edit = QLineEdit(self._settings.deepgram_api_key or "")
+        self.deepgram_key_edit.setEchoMode(QLineEdit.Password)
+        self.deepgram_key_edit.setPlaceholderText("Deepgram API key")
+        keys_grid.addWidget(QLabel("Deepgram"), kr, 0)
+        keys_grid.addWidget(self.deepgram_key_edit, kr, 1)
+        kr += 1
+
+        self.openai_key_edit = QLineEdit(self._settings.openai_api_key or "")
+        self.openai_key_edit.setEchoMode(QLineEdit.Password)
+        self.openai_key_edit.setPlaceholderText("OpenAI API key")
+        keys_grid.addWidget(QLabel("OpenAI"), kr, 0)
+        keys_grid.addWidget(self.openai_key_edit, kr, 1)
+        kr += 1
+
+        self.gemini_key_edit = QLineEdit(self._settings.gemini_api_key or "")
+        self.gemini_key_edit.setEchoMode(QLineEdit.Password)
+        self.gemini_key_edit.setPlaceholderText("Gemini API key")
+        keys_grid.addWidget(QLabel("Gemini"), kr, 0)
+        keys_grid.addWidget(self.gemini_key_edit, kr, 1)
+        kr += 1
+
+        keys_group.setLayout(keys_grid)
+        layout.addWidget(keys_group)
+
+        # --- Notes provider / model / prompt ---
+        notes_group = QGroupBox("Meeting Notes")
+        notes_grid = QGridLayout()
+        nr = 0
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems([p.capitalize() for p in PROVIDERS])
+        self.provider_combo.setCurrentText(self._settings.notes_provider.capitalize())
+        notes_grid.addWidget(QLabel("Provider"), nr, 0)
+        notes_grid.addWidget(self.provider_combo, nr, 1)
+        nr += 1
+
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self._populate_models()
+        notes_grid.addWidget(QLabel("Model"), nr, 0)
+        notes_grid.addWidget(self.model_combo, nr, 1)
+        nr += 1
+
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlainText(self._settings.notes_system_prompt)
+        self.prompt_edit.setMinimumHeight(100)
+        notes_grid.addWidget(QLabel("System prompt"), nr, 0, Qt.AlignTop)
+        notes_grid.addWidget(self.prompt_edit, nr, 1)
+        nr += 1
+
+        notes_group.setLayout(notes_grid)
+        layout.addWidget(notes_group)
+
+        # --- Buttons ---
         buttons = QHBoxLayout()
         save_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
@@ -135,10 +271,25 @@ class SettingsDialog(QDialog):
 
         self.setLayout(layout)
 
+        # Signals
         self.crf_slider.valueChanged.connect(lambda v: self.crf_value.setText(str(v)))
         self.speed_slider.valueChanged.connect(
             lambda v: self.speed_value.setText(f"{v}x")
         )
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+
+    def _populate_models(self) -> None:
+        provider = self.provider_combo.currentText().lower()
+        models = list(MODELS_BY_PROVIDER.get(provider, []))
+        saved = self._settings.notes_model
+        if saved and saved not in models:
+            models.append(saved)
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentText(saved)
+
+    def _on_provider_changed(self, _text: str) -> None:
+        self._populate_models()
 
     def _choose_ffmpeg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select ffmpeg binary")
@@ -159,6 +310,15 @@ class SettingsDialog(QDialog):
             preset=self.preset_combo.currentText(),
             default_suffix=self.suffix_edit.text().strip() or "processed",
             ffmpeg_path=ffmpeg_path,
+            transcript_enabled=self._settings.transcript_enabled,
+            notes_enabled=self._settings.notes_enabled,
+            deepgram_api_key=self.deepgram_key_edit.text().strip() or None,
+            openai_api_key=self.openai_key_edit.text().strip() or None,
+            gemini_api_key=self.gemini_key_edit.text().strip() or None,
+            notes_provider=self.provider_combo.currentText().lower(),
+            notes_model=self.model_combo.currentText().strip() or "gpt-4o",
+            notes_system_prompt=self.prompt_edit.toPlainText().strip()
+            or self._settings.notes_system_prompt,
         )
         self.accept()
 
@@ -180,8 +340,12 @@ class MainWindow(QMainWindow):
         self.runner.set_ffmpeg_binary(self.settings.ffmpeg_path)
         self.worker_thread: Optional[QThread] = None
         self.worker: Optional[FFmpegWorker] = None
+        self.pp_thread: Optional[QThread] = None
+        self.pp_worker: Optional[PostProcessWorker] = None
         self._updating_output = False
         self._last_suggested_output: Optional[str] = None
+        self._pending_transcript = False
+        self._pending_notes = False
 
         self._build_ui()
         self._wire_signals()
@@ -195,9 +359,9 @@ class MainWindow(QMainWindow):
         # Input row + settings gear
         input_row = QHBoxLayout()
         self.settings_btn = QToolButton()
-        self.settings_btn.setText("⚙")
+        self.settings_btn.setText("\u2699")
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Drop a video file or browse…")
+        self.input_edit.setPlaceholderText("Drop a video file or browse\u2026")
         browse_btn = QPushButton("Browse")
         browse_btn.clicked.connect(self._choose_input)
         input_row.addWidget(self.settings_btn)
@@ -257,6 +421,17 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(grid)
 
+        # AI feature toggles
+        ai_row = QHBoxLayout()
+        self.transcript_checkbox = QCheckBox("Generate Transcript")
+        self.transcript_checkbox.setChecked(self.settings.transcript_enabled)
+        self.notes_checkbox = QCheckBox("Generate Meeting Notes")
+        self.notes_checkbox.setChecked(self.settings.notes_enabled)
+        ai_row.addWidget(self.transcript_checkbox)
+        ai_row.addWidget(self.notes_checkbox)
+        ai_row.addStretch()
+        layout.addLayout(ai_row)
+
         # Buttons
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Run")
@@ -287,6 +462,11 @@ class MainWindow(QMainWindow):
         self.run_btn.clicked.connect(self._start_run)
         self.cancel_btn.clicked.connect(self._cancel_run)
         self.settings_btn.clicked.connect(self._open_settings)
+        self.notes_checkbox.stateChanged.connect(self._on_notes_toggled)
+
+    def _on_notes_toggled(self, state: int) -> None:
+        if state == Qt.Checked.value and not self.transcript_checkbox.isChecked():
+            self.transcript_checkbox.setChecked(True)
 
     # Drag and drop
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
@@ -351,6 +531,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing input", "Please select an input file.")
             return
 
+        do_transcript = self.transcript_checkbox.isChecked()
+        do_notes = self.notes_checkbox.isChecked()
+
+        if do_transcript and not self.settings.deepgram_api_key:
+            QMessageBox.warning(
+                self, "Missing API key",
+                "Deepgram API key is required for transcription. Set it in Settings.",
+            )
+            return
+        if do_notes and not self.settings.openai_api_key:
+            QMessageBox.warning(
+                self, "Missing API key",
+                "OpenAI API key is required for meeting notes. Set it in Settings.",
+            )
+            return
+
         opts = FFmpegOptions(
             input_path=Path(input_text),
             output_path=Path(self.output_edit.text()) if self.output_edit.text() else None,
@@ -361,6 +557,9 @@ class MainWindow(QMainWindow):
             preset=self.preset_combo.currentText(),
         )
 
+        self._pending_transcript = do_transcript
+        self._pending_notes = do_notes
+
         self.log_view.clear()
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
@@ -370,7 +569,7 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.log_line.connect(self._append_log)
-        self.worker.finished.connect(self._on_finished)
+        self.worker.finished.connect(self._on_ffmpeg_finished)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker_thread.finished.connect(self._cleanup_worker)
         self.worker_thread.start()
@@ -378,21 +577,65 @@ class MainWindow(QMainWindow):
     def _cancel_run(self) -> None:
         if self.worker:
             self.worker.cancel()
+        if self.pp_worker:
+            self.pp_worker.cancel()
         self.cancel_btn.setEnabled(False)
 
-    def _on_finished(self, success: bool, message: object) -> None:
+    def _on_ffmpeg_finished(self, success: bool, message: object) -> None:
         if message:
             self._append_log(f"{message}\n")
         if success:
-            self._append_log("Done.\n")
+            self._append_log("FFmpeg done.\n")
         else:
-            self._append_log("Failed.\n")
+            self._append_log("FFmpeg failed.\n")
+            self.run_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            return
+
+        if self._pending_transcript or self._pending_notes:
+            self._start_post_processing()
+        else:
+            self._append_log("Done.\n")
+            self.run_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+
+    def _start_post_processing(self) -> None:
+        input_path = Path(self.input_edit.text().strip())
+        output_dir = input_path.parent
+
+        self.pp_thread = QThread()
+        self.pp_worker = PostProcessWorker(
+            input_path=input_path,
+            output_dir=output_dir,
+            settings=self.settings,
+            do_transcript=self._pending_transcript,
+            do_notes=self._pending_notes,
+        )
+        self.pp_worker.moveToThread(self.pp_thread)
+        self.pp_thread.started.connect(self.pp_worker.run)
+        self.pp_worker.log_line.connect(self._append_log)
+        self.pp_worker.finished.connect(self._on_post_process_finished)
+        self.pp_worker.finished.connect(self.pp_thread.quit)
+        self.pp_thread.finished.connect(self._cleanup_pp_worker)
+        self.pp_thread.start()
+
+    def _on_post_process_finished(self, success: bool, message: object) -> None:
+        if message:
+            self._append_log(f"{message}\n")
+        if success:
+            self._append_log("All done.\n")
+        else:
+            self._append_log("Post-processing failed.\n")
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
 
     def _cleanup_worker(self) -> None:
         self.worker = None
         self.worker_thread = None
+
+    def _cleanup_pp_worker(self) -> None:
+        self.pp_worker = None
+        self.pp_thread = None
 
     def _append_log(self, text: str) -> None:
         cursor = self.log_view.textCursor()
@@ -407,6 +650,8 @@ class MainWindow(QMainWindow):
         self.speed_slider.setValue(self.settings.speed)
         self.fps_spin.setValue(self.settings.fps or 0)
         self.preset_combo.setCurrentText(self.settings.preset)
+        self.transcript_checkbox.setChecked(self.settings.transcript_enabled)
+        self.notes_checkbox.setChecked(self.settings.notes_enabled)
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -421,7 +666,6 @@ class MainWindow(QMainWindow):
 def launch() -> None:
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(720, 520)
+    window.resize(720, 580)
     window.show()
     sys.exit(app.exec())
-
