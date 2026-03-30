@@ -22,23 +22,28 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="FFmpegWrapper",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     icon="resources/app_icon.icns",
     entitlements_file=None,
 )
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="FFmpegWrapper",
+)
+app = BUNDLE(
+    coll,
     name="FFmpegWrapper.app",
     icon="resources/app_icon.icns",
     bundle_identifier="com.example.ffmpegwrapper",

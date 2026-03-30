@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from .ffmpeg_runner import FFmpegRunner
 from .notes_generator import run_notes_generation
-from .options import PRESETS, FFmpegOptions, suggest_output_path
+from .options import AUDIO_EXTENSIONS, PRESETS, FFmpegOptions, is_audio_file, suggest_output_path
 from .settings import MODELS_BY_PROVIDER, PROVIDERS, AppSettings
 from .transcriber import run_transcription
 
@@ -361,7 +361,7 @@ class MainWindow(QMainWindow):
         self.settings_btn = QToolButton()
         self.settings_btn.setText("\u2699")
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Drop a video file or browse\u2026")
+        self.input_edit.setPlaceholderText("Drop a video or audio file or browse\u2026")
         browse_btn = QPushButton("Browse")
         browse_btn.clicked.connect(self._choose_input)
         input_row.addWidget(self.settings_btn)
@@ -391,7 +391,8 @@ class MainWindow(QMainWindow):
         self.crf_slider.setRange(15, 35)
         self.crf_slider.setValue(self.options.crf)
         self.crf_value = QLabel(str(self.options.crf))
-        grid.addWidget(QLabel("Compression (CRF)"), row, 0)
+        self._lbl_crf = QLabel("Compression (CRF)")
+        grid.addWidget(self._lbl_crf, row, 0)
         grid.addWidget(self.crf_slider, row, 1)
         grid.addWidget(self.crf_value, row, 2)
         row += 1
@@ -400,7 +401,8 @@ class MainWindow(QMainWindow):
         self.speed_slider.setRange(1, 20)
         self.speed_slider.setValue(self.options.speed)
         self.speed_value = QLabel(f"{self.options.speed}x")
-        grid.addWidget(QLabel("Speed"), row, 0)
+        self._lbl_speed = QLabel("Speed")
+        grid.addWidget(self._lbl_speed, row, 0)
         grid.addWidget(self.speed_slider, row, 1)
         grid.addWidget(self.speed_value, row, 2)
         row += 1
@@ -408,37 +410,32 @@ class MainWindow(QMainWindow):
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(0, 240)
         self.fps_spin.setValue(0)
-        grid.addWidget(QLabel("FPS (0 = source)"), row, 0)
+        self._lbl_fps = QLabel("FPS (0 = source)")
+        grid.addWidget(self._lbl_fps, row, 0)
         grid.addWidget(self.fps_spin, row, 1)
         row += 1
 
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
         self.preset_combo.setCurrentText(self.options.preset)
-        grid.addWidget(QLabel("Preset"), row, 0)
+        self._lbl_preset = QLabel("Preset")
+        grid.addWidget(self._lbl_preset, row, 0)
         grid.addWidget(self.preset_combo, row, 1)
         row += 1
 
         layout.addLayout(grid)
 
-        # AI feature toggles
-        ai_row = QHBoxLayout()
-        self.transcript_checkbox = QCheckBox("Generate Transcript")
-        self.transcript_checkbox.setChecked(self.settings.transcript_enabled)
-        self.notes_checkbox = QCheckBox("Generate Meeting Notes")
-        self.notes_checkbox.setChecked(self.settings.notes_enabled)
-        ai_row.addWidget(self.transcript_checkbox)
-        ai_row.addWidget(self.notes_checkbox)
-        ai_row.addStretch()
-        layout.addLayout(ai_row)
-
-        # Buttons
+        # Action buttons
         btn_row = QHBoxLayout()
-        self.run_btn = QPushButton("Run")
+        self.compress_btn = QPushButton("Compress")
+        self.transcript_btn = QPushButton("Get Transcript")
+        self.notes_btn = QPushButton("Get Notes")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         btn_row.addStretch()
-        btn_row.addWidget(self.run_btn)
+        btn_row.addWidget(self.compress_btn)
+        btn_row.addWidget(self.transcript_btn)
+        btn_row.addWidget(self.notes_btn)
         btn_row.addWidget(self.cancel_btn)
         layout.addLayout(btn_row)
 
@@ -459,14 +456,11 @@ class MainWindow(QMainWindow):
         self.speed_slider.valueChanged.connect(self._on_speed_changed)
         self.fps_spin.valueChanged.connect(self._refresh_output_path)
         self.preset_combo.currentTextChanged.connect(self._refresh_output_path)
-        self.run_btn.clicked.connect(self._start_run)
+        self.compress_btn.clicked.connect(self._start_compress)
+        self.transcript_btn.clicked.connect(self._start_transcript)
+        self.notes_btn.clicked.connect(self._start_notes)
         self.cancel_btn.clicked.connect(self._cancel_run)
         self.settings_btn.clicked.connect(self._open_settings)
-        self.notes_checkbox.stateChanged.connect(self._on_notes_toggled)
-
-    def _on_notes_toggled(self, state: int) -> None:
-        if state == Qt.Checked.value and not self.transcript_checkbox.isChecked():
-            self.transcript_checkbox.setChecked(True)
 
     # Drag and drop
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
@@ -484,14 +478,41 @@ class MainWindow(QMainWindow):
             super().dropEvent(event)
 
     def _choose_input(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select input file")
+        audio_exts = " ".join(f"*{e}" for e in sorted(AUDIO_EXTENSIONS))
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select input file",
+            "",
+            f"Video & Audio Files (*.mp4 *.mov *.mkv *.avi *.webm {audio_exts});;"
+            "Video Files (*.mp4 *.mov *.mkv *.avi *.webm);;"
+            f"Audio Files ({audio_exts});;"
+            "All Files (*)",
+        )
         if path:
             self.input_edit.setText(path)
 
     def _on_input_changed(self, text: str) -> None:
         if text:
             self.options.input_path = Path(text)
+            self._update_controls_for_input(Path(text))
             self._refresh_output_path()
+
+    def _update_controls_for_input(self, path: Path) -> None:
+        audio = is_audio_file(path)
+        for widget in (
+            self.audio_checkbox,
+            self.crf_slider,
+            self.crf_value,
+            self.speed_slider,
+            self.speed_value,
+            self.fps_spin,
+            self.preset_combo,
+            self._lbl_crf,
+            self._lbl_speed,
+            self._lbl_fps,
+            self._lbl_preset,
+        ):
+            widget.setEnabled(not audio)
 
     def _on_output_changed(self, text: str) -> None:
         if self._updating_output:
@@ -525,26 +546,22 @@ class MainWindow(QMainWindow):
                 self.output_edit.setText(suggested_str)
                 self._updating_output = False
 
-    def _start_run(self) -> None:
-        input_text = self.input_edit.text().strip()
-        if not input_text:
+    def _validate_input(self) -> Optional[str]:
+        text = self.input_edit.text().strip()
+        if not text:
             QMessageBox.warning(self, "Missing input", "Please select an input file.")
-            return
+            return None
+        return text
 
-        do_transcript = self.transcript_checkbox.isChecked()
-        do_notes = self.notes_checkbox.isChecked()
+    def _set_running(self, running: bool) -> None:
+        self.compress_btn.setEnabled(not running)
+        self.transcript_btn.setEnabled(not running)
+        self.notes_btn.setEnabled(not running)
+        self.cancel_btn.setEnabled(running)
 
-        if do_transcript and not self.settings.deepgram_api_key:
-            QMessageBox.warning(
-                self, "Missing API key",
-                "Deepgram API key is required for transcription. Set it in Settings.",
-            )
-            return
-        if do_notes and not self.settings.openai_api_key:
-            QMessageBox.warning(
-                self, "Missing API key",
-                "OpenAI API key is required for meeting notes. Set it in Settings.",
-            )
+    def _start_compress(self) -> None:
+        input_text = self._validate_input()
+        if not input_text:
             return
 
         opts = FFmpegOptions(
@@ -557,12 +574,11 @@ class MainWindow(QMainWindow):
             preset=self.preset_combo.currentText(),
         )
 
-        self._pending_transcript = do_transcript
-        self._pending_notes = do_notes
+        self._pending_transcript = False
+        self._pending_notes = False
 
         self.log_view.clear()
-        self.run_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
+        self._set_running(True)
 
         self.worker_thread = QThread()
         self.worker = FFmpegWorker(self.runner, opts)
@@ -573,6 +589,46 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker_thread.finished.connect(self._cleanup_worker)
         self.worker_thread.start()
+
+    def _start_transcript(self) -> None:
+        input_text = self._validate_input()
+        if not input_text:
+            return
+        if not self.settings.deepgram_api_key:
+            QMessageBox.warning(
+                self, "Missing API key",
+                "Deepgram API key is required for transcription. Set it in Settings.",
+            )
+            return
+
+        self._pending_transcript = True
+        self._pending_notes = False
+        self.log_view.clear()
+        self._set_running(True)
+        self._start_post_processing()
+
+    def _start_notes(self) -> None:
+        input_text = self._validate_input()
+        if not input_text:
+            return
+        if not self.settings.deepgram_api_key:
+            QMessageBox.warning(
+                self, "Missing API key",
+                "Deepgram API key is required for transcription. Set it in Settings.",
+            )
+            return
+        if not self.settings.openai_api_key:
+            QMessageBox.warning(
+                self, "Missing API key",
+                "OpenAI API key is required for meeting notes. Set it in Settings.",
+            )
+            return
+
+        self._pending_transcript = True
+        self._pending_notes = True
+        self.log_view.clear()
+        self._set_running(True)
+        self._start_post_processing()
 
     def _cancel_run(self) -> None:
         if self.worker:
@@ -585,19 +641,14 @@ class MainWindow(QMainWindow):
         if message:
             self._append_log(f"{message}\n")
         if success:
-            self._append_log("FFmpeg done.\n")
+            self._append_log("Compression done.\n")
         else:
-            self._append_log("FFmpeg failed.\n")
-            self.run_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(False)
+            self._append_log("Compression failed.\n")
+            self._set_running(False)
             return
 
-        if self._pending_transcript or self._pending_notes:
-            self._start_post_processing()
-        else:
-            self._append_log("Done.\n")
-            self.run_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(False)
+        self._append_log("Done.\n")
+        self._set_running(False)
 
     def _start_post_processing(self) -> None:
         input_path = Path(self.input_edit.text().strip())
@@ -626,8 +677,7 @@ class MainWindow(QMainWindow):
             self._append_log("All done.\n")
         else:
             self._append_log("Post-processing failed.\n")
-        self.run_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
+        self._set_running(False)
 
     def _cleanup_worker(self) -> None:
         self.worker = None
@@ -650,8 +700,6 @@ class MainWindow(QMainWindow):
         self.speed_slider.setValue(self.settings.speed)
         self.fps_spin.setValue(self.settings.fps or 0)
         self.preset_combo.setCurrentText(self.settings.preset)
-        self.transcript_checkbox.setChecked(self.settings.transcript_enabled)
-        self.notes_checkbox.setChecked(self.settings.notes_enabled)
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)

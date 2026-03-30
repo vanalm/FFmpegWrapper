@@ -42,6 +42,14 @@ def extract_audio(
         raise RuntimeError(f"Audio extraction failed:\n{proc.stderr}")
 
 
+def _fmt_ts(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 def transcribe_deepgram(
     audio_path: Path,
     api_key: str,
@@ -51,7 +59,11 @@ def transcribe_deepgram(
         log("Sending audio to Deepgram...\n")
 
     audio_data = audio_path.read_bytes()
-    url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&paragraphs=true"
+    url = (
+        "https://api.deepgram.com/v1/listen"
+        "?model=nova-2&smart_format=true&paragraphs=true"
+        "&diarize=true&utterances=true"
+    )
 
     req = urllib.request.Request(
         url,
@@ -66,24 +78,20 @@ def transcribe_deepgram(
     with urllib.request.urlopen(req, timeout=300) as resp:
         body = json.loads(resp.read().decode())
 
-    channels = body.get("results", {}).get("channels", [])
-    if not channels:
-        raise RuntimeError("Deepgram returned no transcript channels")
-
-    paragraphs_data = (
-        channels[0]
-        .get("alternatives", [{}])[0]
-        .get("paragraphs", {})
-        .get("paragraphs", [])
-    )
-
-    if paragraphs_data:
+    utterances = body.get("results", {}).get("utterances", [])
+    if utterances:
         lines: list[str] = []
-        for para in paragraphs_data:
-            sentences = para.get("sentences", [])
-            lines.append(" ".join(s.get("text", "") for s in sentences))
+        for utt in utterances:
+            speaker = utt.get("speaker", "?")
+            start = _fmt_ts(utt.get("start", 0))
+            end = _fmt_ts(utt.get("end", 0))
+            text = utt.get("transcript", "")
+            lines.append(f"[{start} - {end}] Speaker {speaker}: {text}")
         transcript = "\n\n".join(lines)
     else:
+        channels = body.get("results", {}).get("channels", [])
+        if not channels:
+            raise RuntimeError("Deepgram returned no transcript data")
         transcript = (
             channels[0].get("alternatives", [{}])[0].get("transcript", "")
         )

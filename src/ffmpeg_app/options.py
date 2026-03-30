@@ -14,6 +14,12 @@ PRESETS = [
     "slow",
 ]
 
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}
+
+
+def is_audio_file(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTENSIONS
+
 
 @dataclass
 class FFmpegOptions:
@@ -31,6 +37,12 @@ class FFmpegOptions:
         output = self.output_path or suggest_output_path(self.input_path, self)
 
         args: List[str] = ["-i", str(self.input_path)]
+
+        if is_audio_file(self.input_path):
+            args.extend(["-c:a", "aac", "-b:a", "192k"])
+            args.append(str(output))
+            return args
+
         if not self.include_audio:
             args.append("-an")
 
@@ -79,5 +91,8 @@ def suggest_output_path(
         suffix_parts.append(options.preset)
 
     suffix = "_".join(suffix_parts) if suffix_parts else default_suffix
-    new_ext = ".mp4" if input_path.suffix.lower() != ".mp4" else input_path.suffix
+    if is_audio_file(input_path):
+        new_ext = ".m4a" if input_path.suffix.lower() == ".wav" else input_path.suffix.lower()
+    else:
+        new_ext = ".mp4" if input_path.suffix.lower() != ".mp4" else input_path.suffix
     return Path(f"{base}_{suffix}{new_ext}")
